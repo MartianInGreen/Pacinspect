@@ -8,11 +8,14 @@ The action installs Rust and runs `release.sh`. The script:
 
 1. updates the Cargo and AUR version fields;
 2. runs the formatter check and Rust test suite;
-3. commits and tags the release;
-4. pushes the commit and tag; and
-5. creates the GitHub release with generated notes.
+3. builds the optimized binary for the runner's Rust host target;
+4. commits and tags the release;
+5. pushes the commit and tag; and
+6. creates the GitHub release with generated notes and the binary attached.
 
 The AUR checksum remains `SKIP` until publication because the tagged source archive does not exist before the tag is pushed.
+
+The binary asset is named `pacinspect-X.Y.Z-<rust-host-target>`.
 
 The repository must permit GitHub Actions to write repository contents. Protected-branch rules must also allow the release bot commit.
 

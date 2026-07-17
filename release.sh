@@ -49,12 +49,17 @@ sed -i -E \
 cargo check
 cargo fmt --all --check
 cargo test --locked --all-targets
+cargo build --locked --release
+readonly asset="pacinspect-$version-$(rustc -vV | sed -n 's/^host: //p')"
+cp target/release/pacinspect "$asset"
 
-git config user.name github-actions[bot]
-git config user.email 41898282+github-actions[bot]@users.noreply.github.com
 git add Cargo.toml Cargo.lock packaging/aur/PKGBUILD packaging/aur/.SRCINFO
 if ! git diff --cached --quiet; then
-  git -c commit.gpgSign=false commit -m "release: $tag"
+  git \
+    -c 'user.name=github-actions[bot]' \
+    -c 'user.email=41898282+github-actions[bot]@users.noreply.github.com' \
+    -c commit.gpgSign=false \
+    commit -m "release: $tag"
 fi
 git -c tag.gpgSign=false tag -a "$tag" -m "Pacinspect $tag"
 git push origin "HEAD:$branch" "refs/tags/$tag"
@@ -63,6 +68,6 @@ release_args=("$tag" --title "Pacinspect $tag" --generate-notes)
 if [[ "$prerelease" == true ]]; then
   release_args+=(--prerelease)
 fi
-gh release create "${release_args[@]}"
+gh release create "${release_args[@]}" "$asset"
 
 echo "Released Pacinspect $tag"
