@@ -3,19 +3,9 @@ name: Create release
 on:
   workflow_dispatch:
     inputs:
-      bump:
-        description: Version increment to apply
+      version:
+        description: Version to release (X.Y.Z)
         required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-          - custom
-      custom_version:
-        description: Exact X.Y.Z version when bump is custom
-        required: false
         type: string
       prerelease:
         description: Mark the GitHub release as a prerelease
@@ -32,136 +22,21 @@ concurrency:
 
 jobs:
   release:
-    name: Version, tag, and release
+    name: Create release
     runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-      GH_TOKEN: ${{ github.token }}
-
     steps:
-      - name: Require the default branch
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" != "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
-            echo "Run releases from the default branch, not $GITHUB_REF" >&2
-            exit 1
-          fi
-
       - name: Check out complete history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Test release version helper
-        run: python -m unittest discover -s .github/scripts -p 'test_*.py'
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Calculate and apply version
-        id: version
-        shell: bash
+      - name: Run release script
         env:
-          BUMP: ${{ inputs.bump }}
-          CUSTOM_VERSION: ${{ inputs.custom_version }}
-        run: |
-          version="$(python .github/scripts/release_version.py prepare \
-            --bump "$BUMP" --custom-version "$CUSTOM_VERSION")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Preparing v$version"
-
-      - name: Reject an existing tag
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
-            echo "Tag v$VERSION already exists" >&2
-            exit 1
-          fi
-
-      - name: Update lockfile and test
-        shell: bash
-        run: |
-          cargo check
-          cargo fmt --all --check
-          cargo test --locked --all-targets
-
-      - name: Generate release SRCINFO
-        shell: bash
-        run: |
-          docker run --rm --user 65534:65534 -e HOME=/tmp \
-            -v "$PWD:/repo:ro" -w /repo/packaging/aur \
-            archlinux:base-devel makepkg --printsrcinfo \
-            > packaging/aur/.SRCINFO
-
-      - name: Commit and tag release source
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Cargo.toml Cargo.lock packaging/aur/PKGBUILD packaging/aur/.SRCINFO
-          git commit -m "release: v$VERSION"
-          git tag -a "v$VERSION" -m "Pacinspect v$VERSION"
-          git push origin "HEAD:${GITHUB_REF_NAME}" "refs/tags/v$VERSION"
-
-      - name: Download tagged source and calculate checksum
-        id: archive
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/v${VERSION}.tar.gz"
-          curl --location --fail --show-error --silent \
-            --retry 10 --retry-all-errors --retry-delay 2 \
-            --output "/tmp/pacinspect-$VERSION.tar.gz" "$url"
-          checksum="$(sha256sum "/tmp/pacinspect-$VERSION.tar.gz" | cut -d' ' -f1)"
-          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
-
-      - name: Finalize AUR checksum and metadata
-        shell: bash
-        env:
-          CHECKSUM: ${{ steps.archive.outputs.checksum }}
-        run: |
-          python .github/scripts/release_version.py finalize --checksum "$CHECKSUM"
-          docker run --rm --user 65534:65534 -e HOME=/tmp \
-            -v "$PWD:/repo:ro" -w /repo/packaging/aur \
-            archlinux:base-devel makepkg --printsrcinfo \
-            > packaging/aur/.SRCINFO
-
-      - name: Commit finalized AUR package
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git add packaging/aur/PKGBUILD packaging/aur/.SRCINFO
-          git commit -m "packaging(aur): finalize v$VERSION"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-
-      - name: Create GitHub release
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          args=("v$VERSION" --title "Pacinspect v$VERSION" --generate-notes)
-          if [[ "$PRERELEASE" == true ]]; then
-            args+=(--prerelease)
-          fi
-          gh release create "${args[@]}"
-
-      - name: Write workflow summary
-        shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          CHECKSUM: ${{ steps.archive.outputs.checksum }}
-        run: |
-          {
-            echo "## Pacinspect v$VERSION"
-            echo
-            echo "- Tag and GitHub release: \`v$VERSION\`"
-            echo "- Cargo and AUR versions updated automatically"
-            echo "- Source SHA-256: \`$CHECKSUM\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          VERSION: ${{ inputs.version }}
+        run: ./release.sh "$VERSION" "$PRERELEASE"

@@ -28,7 +28,7 @@ cargo install --path .
 
 ### Arch Linux package
 
-An AUR-ready `PKGBUILD` and `.SRCINFO` live in `packaging/aur`. Build and install them locally with:
+The `PKGBUILD` and `.SRCINFO` sources live in `packaging/aur`. Build and install them locally with:
 
 ```sh
 cd packaging/aur

@@ -2,23 +2,24 @@
 
 ## GitHub release workflow
 
-Run the **Create release** workflow manually from the GitHub Actions page on the default branch.
+Run the **Create release** workflow manually from the GitHub Actions page on the default branch. Enter the exact `X.Y.Z` version and choose whether it is a prerelease.
 
-Select `patch`, `minor`, or `major` to calculate the next semantic version automatically. Select `custom` and provide an exact `X.Y.Z` version when a nonstandard increment is required. The release can optionally be marked as a prerelease.
+The action installs Rust and runs `release.sh`. The script:
 
-The workflow:
+1. updates the Cargo and AUR version fields;
+2. runs the formatter check and Rust test suite;
+3. commits and tags the release;
+4. pushes the commit and tag; and
+5. creates the GitHub release with generated notes.
 
-1. updates `Cargo.toml`, `Cargo.lock`, `packaging/aur/PKGBUILD`, and `packaging/aur/.SRCINFO`;
-2. runs the release helper tests, Rust formatter check, and complete Rust test suite;
-3. commits and tags the release as `vX.Y.Z`;
-4. downloads GitHub's tagged source archive and calculates its SHA-256;
-5. commits the finalized AUR checksum and metadata; and
-6. creates the GitHub release with generated notes.
+The AUR checksum remains `SKIP` until publication because the tagged source archive does not exist before the tag is pushed.
 
-The repository must permit GitHub Actions to write repository contents. Protected-branch rules must also allow the release bot commits.
+The repository must permit GitHub Actions to write repository contents. Protected-branch rules must also allow the release bot commit.
 
 ## Publishing to the AUR
 
-The GitHub workflow updates the AUR files in this repository but deliberately does not push to the external AUR Git server, which requires separate AUR SSH credentials.
+The GitHub release stages the AUR metadata but deliberately leaves publication to a machine with separate AUR SSH credentials.
 
-After the workflow succeeds, copy `packaging/aur/PKGBUILD` and `packaging/aur/.SRCINFO` into the `pacinspect` AUR Git repository, commit them together, and push the commit to the AUR remote.
+After the workflow succeeds, run `./release-to-aur.sh`. The script finds the latest stable GitHub release, calculates the tagged source archive's checksum, regenerates `.SRCINFO`, and commits and pushes both AUR files to `ssh://aur@aur.archlinux.org/pacinspect.git`.
+
+The machine running the script needs `git`, `curl`, `makepkg`, a configured Git commit identity, and SSH access to the `pacinspect` AUR repository.
