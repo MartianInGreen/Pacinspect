@@ -1,6 +1,6 @@
 pkgbase = pacinspect
 	pkgdesc = AI-assisted security review gate for AUR PKGBUILDs
-	pkgver = 0.1.0
+	pkgver = 1.0.0
 	pkgrel = 1
 	url = https://github.com/MartianInGreen/Pacinspect
 	arch = x86_64
@@ -12,7 +12,7 @@ pkgbase = pacinspect
 	optdepends = yay: inspect complete AUR transactions before makepkg runs
 	options = !lto
 	options = !debug
-	source = pacinspect-0.1.0.tar.gz::https://github.com/MartianInGreen/Pacinspect/archive/2b173d523198b7e538360fb610ceb59b1ffc8a02.tar.gz
-	sha256sums = a710eee1ee3370caf6cddfac6f3bb7abde79128a3fd4d10abef0cf86084bc11b
+	source = pacinspect-1.0.0.tar.gz::https://github.com/MartianInGreen/Pacinspect/archive/v1.0.0.tar.gz
+	sha256sums = SKIP
 
 pkgname = pacinspect
