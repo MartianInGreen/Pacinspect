@@ -26,6 +26,22 @@ A Rust 1.85+ toolchain is required because the project uses Rust 2024 edition.
 cargo install --path .
 ```
 
+### Arch Linux package
+
+An AUR-ready `PKGBUILD` and `.SRCINFO` live in `packaging/aur`. Build and install them locally with:
+
+```sh
+cd packaging/aur
+makepkg -si
+```
+
+The package installs `pacinspect` as the canonical executable and creates the requested alias chain:
+
+```text
+/usr/bin/pac -> pacinstall
+/usr/bin/pacinstall -> pacinspect
+```
+
 Ensure `$HOME/.cargo/bin` is in `PATH`, then configure the API:
 
 ```sh
