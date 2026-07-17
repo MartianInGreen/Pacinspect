@@ -1,7 +1,10 @@
 use std::env;
 use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use console::{Style, Term};
@@ -25,58 +28,139 @@ pub struct ReviewOutcome {
     pub report: AnalysisReport,
 }
 
+pub struct CompletedReview {
+    pub root: PathBuf,
+    pub content_hash: String,
+    pub report: AnalysisReport,
+}
+
+pub fn analyze_directory(root: &Path, config: &Config) -> Result<CompletedReview> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve package directory {}", root.display()))?;
+    let bundle = inspect::collect(&root, config.max_input_bytes)?;
+    analyze_bundle(root, bundle, config)
+}
+
+pub fn analyze_bundle(
+    root: PathBuf,
+    bundle: inspect::InspectionBundle,
+    config: &Config,
+) -> Result<CompletedReview> {
+    let report = OpenAiClient::new(config)?.analyze(&bundle)?;
+    Ok(CompletedReview {
+        root,
+        content_hash: bundle.content_hash,
+        report,
+    })
+}
+
+pub fn analyze_directories_parallel(
+    roots: &[PathBuf],
+    config: &Config,
+) -> Vec<Result<CompletedReview>> {
+    parallel_map(roots, config.max_parallel_reviews, |root| {
+        analyze_directory(root, config)
+    })
+}
+
+fn parallel_map<T, R>(items: &[T], max_workers: usize, task: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let worker_count = max_workers.max(1).min(items.len());
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel();
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let next = &next;
+            let task = &task;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else {
+                        break;
+                    };
+                    if sender.send((index, task(item))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        let mut results: Vec<_> = receiver.into_iter().collect();
+        results.sort_by_key(|(index, _)| *index);
+        results.into_iter().map(|(_, result)| result).collect()
+    })
+}
+
 pub fn review_directory(
     root: &Path,
     config: &Config,
     options: &ReviewOptions,
 ) -> Result<ReviewOutcome> {
-    loop {
-        let bundle = inspect::collect(root, config.max_input_bytes)?;
-        if !options.json && !options.quiet {
-            eprintln!(
-                "{} {} with model {}",
-                Style::new().cyan().bold().apply_to("Inspecting"),
-                root.display(),
-                Style::new().bold().apply_to(&config.model)
-            );
-        }
-        let report = OpenAiClient::new(config)?.analyze(&bundle)?;
-        if !options.quiet {
-            render_report(&report, options.json)?;
-        }
-        let blocked = report.should_block(config.block_threshold);
-        if !blocked || options.accept_risk {
-            return Ok(ReviewOutcome {
-                approved: true,
-                content_hash: bundle.content_hash,
-                report,
-            });
-        }
-        if options.json || options.non_interactive || !io::stdin().is_terminal() {
-            return Ok(ReviewOutcome {
-                approved: false,
-                content_hash: bundle.content_hash,
-                report,
-            });
-        }
+    if !options.json && !options.quiet {
+        eprintln!(
+            "{} {} with model {}",
+            Style::new().cyan().bold().apply_to("Inspecting"),
+            root.display(),
+            Style::new().bold().apply_to(&config.model)
+        );
+    }
+    let completed = analyze_directory(root, config)?;
+    review_completed(completed, config, options)
+}
 
-        match prompt_action(&report)? {
-            ReviewAction::Abort => {
-                return Ok(ReviewOutcome {
-                    approved: false,
-                    content_hash: bundle.content_hash,
-                    report,
-                });
-            }
-            ReviewAction::EditAndRescan => open_relevant_file(root, &report)?,
-            ReviewAction::Continue => {
-                return Ok(ReviewOutcome {
-                    approved: true,
-                    content_hash: bundle.content_hash,
-                    report,
-                });
-            }
+pub fn review_completed(
+    completed: CompletedReview,
+    config: &Config,
+    options: &ReviewOptions,
+) -> Result<ReviewOutcome> {
+    let CompletedReview {
+        root,
+        content_hash,
+        report,
+    } = completed;
+    if !options.quiet {
+        render_report(&report, options.json)?;
+    }
+    let blocked = report.should_block(config.block_threshold);
+    if !blocked || options.accept_risk {
+        return Ok(ReviewOutcome {
+            approved: true,
+            content_hash,
+            report,
+        });
+    }
+    if options.json || options.non_interactive || !io::stdin().is_terminal() {
+        return Ok(ReviewOutcome {
+            approved: false,
+            content_hash,
+            report,
+        });
+    }
+
+    match prompt_action(&report)? {
+        ReviewAction::Abort => Ok(ReviewOutcome {
+            approved: false,
+            content_hash,
+            report,
+        }),
+        ReviewAction::EditAndRescan => {
+            open_relevant_file(&root, &report)?;
+            review_directory(&root, config, options)
         }
+        ReviewAction::Continue => Ok(ReviewOutcome {
+            approved: true,
+            content_hash,
+            report,
+        }),
     }
 }
 
@@ -256,4 +340,27 @@ fn open_relevant_file(root: &Path, report: &AnalysisReport) -> Result<()> {
         bail!("editor exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn parallel_map_overlaps_work_and_preserves_input_order() {
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        let results = parallel_map(&[3, 1, 4, 2], 4, |value| {
+            let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum.fetch_max(concurrent, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(25));
+            active.fetch_sub(1, Ordering::SeqCst);
+            value * 2
+        });
+
+        assert_eq!(results, [6, 2, 8, 4]);
+        assert_eq!(maximum.load(Ordering::SeqCst), 4);
+    }
 }

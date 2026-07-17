@@ -17,7 +17,10 @@ use console::Style;
 
 use config::Config;
 use report::Severity;
-use ui::{ReviewOptions, interactive_config, prompt_api_key, review_directory};
+use ui::{
+    ReviewOptions, analyze_directories_parallel, interactive_config, prompt_api_key,
+    review_completed, review_directory,
+};
 
 #[derive(Parser)]
 #[command(
@@ -95,6 +98,7 @@ enum ConfigField {
     Model,
     TimeoutSeconds,
     MaxInputBytes,
+    MaxParallelReviews,
     BlockThreshold,
     FailOpen,
     YayBinary,
@@ -102,7 +106,9 @@ enum ConfigField {
 }
 
 fn main() -> ExitCode {
-    let result = if integration::is_makepkg_shim() {
+    let result = if integration::is_yay_preflight() {
+        run_yay_preflight()
+    } else if integration::is_makepkg_shim() {
         run_shim()
     } else {
         run_cli()
@@ -171,21 +177,43 @@ fn run_scan(config: &Config, path: Option<PathBuf>, mut options: ReviewOptions) 
 
     if batch && !options.json {
         eprintln!(
-            "Scanning {} cached package director{}",
+            "Scanning {} cached package director{} with up to {} parallel request{}",
             directories.len(),
-            if directories.len() == 1 { "y" } else { "ies" }
+            if directories.len() == 1 { "y" } else { "ies" },
+            config.max_parallel_reviews.min(directories.len()),
+            if config.max_parallel_reviews.min(directories.len()) == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
     options.quiet = batch && options.json;
 
+    if !batch {
+        let outcome = review_directory(&directories[0], config, &options)?;
+        return Ok(if outcome.approved { 0 } else { 2 });
+    }
+
+    let completed = analyze_directories_parallel(&directories, config);
     let mut blocked = false;
     let mut reports = Vec::with_capacity(if options.quiet { directories.len() } else { 0 });
-    for directory in directories {
-        let outcome = review_directory(&directory, config, &options)?;
+    for (directory, completed) in directories.into_iter().zip(completed) {
+        let completed =
+            completed.with_context(|| format!("failed to inspect {}", directory.display()))?;
+        let package_directory = completed.root.clone();
+        if !options.json {
+            eprintln!(
+                "{} {}",
+                Style::new().cyan().bold().apply_to("Reviewing"),
+                package_directory.display()
+            );
+        }
+        let outcome = review_completed(completed, config, &options)?;
         blocked |= !outcome.approved;
         if options.quiet {
             reports.push(BatchScanReport {
-                package_directory: directory.canonicalize().unwrap_or(directory),
+                package_directory,
                 report: outcome.report,
             });
         }
@@ -219,6 +247,12 @@ fn cached_package_directories(build_dir: &std::path::Path) -> Result<Vec<PathBuf
         );
     }
     Ok(directories)
+}
+
+fn run_yay_preflight() -> Result<i32> {
+    let config_path = integration::shim_config_path().map_or_else(config::default_path, Ok)?;
+    let config = Config::load(&config_path)?;
+    integration::run_yay_preflight(&config, std::env::args_os().skip(2).collect())
 }
 
 fn run_shim() -> Result<i32> {
@@ -279,6 +313,11 @@ fn set_config_value(config: &mut Config, field: ConfigField, value: Option<Strin
             config.max_input_bytes = value
                 .parse()
                 .context("max-input-bytes must be an integer")?
+        }
+        ConfigField::MaxParallelReviews => {
+            config.max_parallel_reviews = value
+                .parse()
+                .context("max-parallel-reviews must be an integer")?
         }
         ConfigField::BlockThreshold => config.block_threshold = Severity::from_str(&value)?,
         ConfigField::FailOpen => {

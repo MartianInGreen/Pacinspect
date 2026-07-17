@@ -19,6 +19,7 @@ pub struct Config {
     pub model: String,
     pub timeout_seconds: u64,
     pub max_input_bytes: usize,
+    pub max_parallel_reviews: usize,
     pub block_threshold: Severity,
     pub fail_open: bool,
     pub yay_binary: String,
@@ -33,6 +34,7 @@ impl Default for Config {
             model: "gpt-4.1-mini".into(),
             timeout_seconds: 90,
             max_input_bytes: 300_000,
+            max_parallel_reviews: 8,
             block_threshold: Severity::Medium,
             fail_open: false,
             yay_binary: "yay".into(),
@@ -117,6 +119,9 @@ impl Config {
         }
         if self.max_input_bytes < 16_384 {
             bail!("max_input_bytes must be at least 16384");
+        }
+        if self.max_parallel_reviews == 0 {
+            bail!("max_parallel_reviews must be greater than zero");
         }
         if self.yay_binary.trim().is_empty() || self.makepkg_binary.trim().is_empty() {
             bail!("yay_binary and makepkg_binary must not be empty");

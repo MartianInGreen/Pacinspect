@@ -4,17 +4,19 @@ Pacinspect is an AI-assisted security review gate for Arch User Repository (AUR)
 
 Pacinspect is a review aid, not a sandbox or a guarantee that a package is safe. A model can miss malicious behavior. Read high-impact PKGBUILDs yourself and build untrusted packages in an isolated environment.
 
-## Why the yay integration wraps makepkg
+## How the yay integration works
 
-A shell alias cannot reliably identify every AUR dependency that yay resolves. Pacinspect instead launches yay with a temporary `--makepkg` override:
+A shell alias cannot reliably identify every AUR dependency that yay resolves. Pacinspect uses two temporary, process-local yay overrides:
 
-1. yay resolves dependencies and downloads each AUR package repository normally.
-2. Before yay's first `makepkg` call for a package base—including source verification—Pacinspect inspects that package directory.
-3. A safe or explicitly approved review is cached by content hash for that single yay run.
-4. Pacinspect delegates the original arguments to the real makepkg executable.
-5. A blocked or failed closed review returns before makepkg can source the PKGBUILD.
+1. yay resolves dependencies and clones or updates every AUR package repository in the transaction.
+2. Immediately before source verification, yay's pre-download editor hook passes Pacinspect the exact transaction's PKGBUILD paths. Pacinspect analyzes those package directories concurrently.
+3. Each package gets an independent API request and model context. Reports and interactive decisions are presented sequentially so terminal output and prompts cannot overlap.
+4. Safe or explicitly approved content hashes are cached for that yay run.
+5. A temporary `makepkg` shim remains as a fail-closed fallback for recipes that changed after preflight or were not included in it, then delegates unchanged arguments to the real makepkg.
 
-The override is process-local and is never saved to yay's configuration. Repository packages, which yay gives directly to pacman, are not scanned. Pacinspect rejects `pacinspect yay --save` so its temporary override cannot accidentally become permanent.
+Yay finishes cloning all transaction PKGBUILD repositories before invoking the pre-download hook, so the analyses can overlap even when yay's own source downloads are sequential. A blocked preflight exits its editor hook unsuccessfully, which makes yay abort before source verification or PKGBUILD execution.
+
+The overrides are never saved to yay's configuration. Pacinspect reserves yay's `editor`, `editorflags`, `editmenu`, and `answeredit` options during the wrapped process; conflicting arguments are stripped. Yay displays its normal “Proceed with install?” confirmation after the successful preflight hook. Repository packages passed directly to pacman are not scanned. Pacinspect rejects `pacinspect yay --save` so temporary overrides cannot become permanent.
 
 ## Install
 
@@ -83,6 +85,8 @@ pacinspect scan --accept-risk ~/.cache/yay/example
 
 Without a path, `--json` emits one JSON array whose entries include `package_directory`; an explicit path retains the single-report JSON object. Pacinspect reads the active build directory from `yay -P -g`, so custom yay cache locations work without additional Pacinspect configuration.
 
+Cached package analyses also run concurrently. The default limit is eight active API requests; use `pacinspect config set max-parallel-reviews N` to tune it for provider rate limits. Result order remains deterministic, and each request contains only one package's inspection bundle.
+
 Run yay through the security gate:
 
 ```sh
@@ -117,9 +121,12 @@ block_threshold = "medium"
 fail_open = false
 timeout_seconds = 90
 max_input_bytes = 300000
+max_parallel_reviews = 8
 ```
 
 `block_threshold` accepts `info`, `low`, `medium`, `high`, or `critical`. A model verdict of `dangerous` always blocks, even if its individual finding severities are lower. `fail_open = false` means API errors, invalid model output, and timeouts stop a wrapped build. Enabling fail-open is possible but weakens the gate and prints a prominent warning.
+
+`max_parallel_reviews` controls both cached scans and yay transaction preflights. Lower it if the API returns rate-limit errors; increase it when the provider supports more simultaneous requests.
 
 Exit codes:
 
