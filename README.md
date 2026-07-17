@@ -28,6 +28,12 @@ cargo install --path .
 
 ### Arch Linux package
 
+Pacinspect is available from the AUR as [`pacinspect`](https://aur.archlinux.org/packages/pacinspect):
+
+```sh
+yay -S pacinspect
+```
+
 The `PKGBUILD` and `.SRCINFO` sources live in `packaging/aur`. Build and install them locally with:
 
 ```sh
