@@ -42,20 +42,26 @@ pacinspect config show              # API key is redacted
 pacinspect config path
 ```
 
-Environment variables override saved values:
+`PACINSPECT_*` environment variables explicitly override saved settings. Generic OpenAI variables are compatibility fallbacks: a saved `api_key` takes precedence over `OPENAI_API_KEY`, and a saved configuration file's URL takes precedence over `OPENAI_BASE_URL`. This prevents credentials or endpoints exported for another tool from silently replacing Pacinspect's configured provider.
 
-| Variable | Fallback | Purpose |
+| Setting | Explicit override | Compatibility fallback |
 | --- | --- | --- |
-| `PACINSPECT_API_URL` | `OPENAI_BASE_URL` | API base URL or full `/chat/completions` URL |
-| `PACINSPECT_API_KEY` | `OPENAI_API_KEY` | Bearer token |
-| `PACINSPECT_MODEL` | none | Model name |
-| `PACINSPECT_CONFIG` | platform default | Configuration file path |
+| API URL | `PACINSPECT_API_URL` | `OPENAI_BASE_URL` when no config file exists |
+| API key | `PACINSPECT_API_KEY` | `OPENAI_API_KEY` when no key is saved |
+| Model | `PACINSPECT_MODEL` | none |
+| Configuration file | `PACINSPECT_CONFIG` | platform default |
 
 An API key may be omitted for a local unauthenticated endpoint. The endpoint must accept OpenAI-style `POST /chat/completions` requests and return text in `choices[0].message.content`. Pacinspect asks the model for a strict JSON report but does not depend on provider-specific structured-output options.
 
 ## Use
 
-Inspect an already downloaded package recipe:
+With no path, scan every cached package directory containing a `PKGBUILD` under yay's currently configured `buildDir`:
+
+```sh
+pacinspect scan
+```
+
+Pass a path to inspect only one downloaded package recipe:
 
 ```sh
 pacinspect scan ~/.cache/yay/example
@@ -74,6 +80,8 @@ pacinspect scan --json ~/.cache/yay/example
 pacinspect scan --non-interactive ~/.cache/yay/example
 pacinspect scan --accept-risk ~/.cache/yay/example
 ```
+
+Without a path, `--json` emits one JSON array whose entries include `package_directory`; an explicit path retains the single-report JSON object. Pacinspect reads the active build directory from `yay -P -g`, so custom yay cache locations work without additional Pacinspect configuration.
 
 Run yay through the security gate:
 

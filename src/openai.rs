@@ -69,7 +69,6 @@ impl OpenAiClient {
             serde_json::to_string(bundle).context("failed to encode inspection input")?;
         let request = json!({
             "model": self.model,
-            "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content}

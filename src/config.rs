@@ -56,8 +56,9 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        let config_file_exists = path.exists();
         let mut config = Self::load_file(path)?;
-        config.apply_environment();
+        config.apply_environment(config_file_exists);
         config.validate()?;
         Ok(config)
     }
@@ -123,17 +124,45 @@ impl Config {
         Ok(())
     }
 
-    fn apply_environment(&mut self) {
-        if let Ok(value) = env::var("PACINSPECT_API_URL").or_else(|_| env::var("OPENAI_BASE_URL")) {
-            self.api_url = value;
-        }
-        if let Ok(value) = env::var("PACINSPECT_API_KEY").or_else(|_| env::var("OPENAI_API_KEY")) {
-            self.api_key = Some(value);
-        }
+    fn apply_environment(&mut self, config_file_exists: bool) {
+        self.api_url = resolve_api_url(
+            std::mem::take(&mut self.api_url),
+            config_file_exists,
+            env::var("PACINSPECT_API_URL").ok(),
+            env::var("OPENAI_BASE_URL").ok(),
+        );
+        self.api_key = resolve_api_key(
+            self.api_key.take(),
+            env::var("PACINSPECT_API_KEY").ok(),
+            env::var("OPENAI_API_KEY").ok(),
+        );
         if let Ok(value) = env::var("PACINSPECT_MODEL") {
             self.model = value;
         }
     }
+}
+
+fn resolve_api_url(
+    saved: String,
+    config_file_exists: bool,
+    pacinspect_environment: Option<String>,
+    openai_environment: Option<String>,
+) -> String {
+    pacinspect_environment
+        .or_else(|| {
+            (!config_file_exists)
+                .then_some(openai_environment)
+                .flatten()
+        })
+        .unwrap_or(saved)
+}
+
+fn resolve_api_key(
+    saved: Option<String>,
+    pacinspect_environment: Option<String>,
+    openai_environment: Option<String>,
+) -> Option<String> {
+    pacinspect_environment.or(saved).or(openai_environment)
 }
 
 pub fn default_path() -> Result<PathBuf> {
@@ -170,5 +199,62 @@ mod tests {
             let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn saved_key_beats_generic_openai_environment_fallback() {
+        assert_eq!(
+            resolve_api_key(
+                Some("saved".into()),
+                None,
+                Some("generic-environment".into())
+            )
+            .as_deref(),
+            Some("saved")
+        );
+        assert_eq!(
+            resolve_api_key(
+                Some("saved".into()),
+                Some("pacinspect-environment".into()),
+                Some("generic-environment".into())
+            )
+            .as_deref(),
+            Some("pacinspect-environment")
+        );
+        assert_eq!(
+            resolve_api_key(None, None, Some("generic-environment".into())).as_deref(),
+            Some("generic-environment")
+        );
+    }
+
+    #[test]
+    fn saved_url_beats_generic_openai_environment_fallback() {
+        assert_eq!(
+            resolve_api_url(
+                "https://saved.example/v1".into(),
+                true,
+                None,
+                Some("https://generic.example/v1".into())
+            ),
+            "https://saved.example/v1"
+        );
+        assert_eq!(
+            resolve_api_url(
+                "https://saved.example/v1".into(),
+                true,
+                Some("https://pacinspect.example/v1".into()),
+                Some("https://generic.example/v1".into())
+            ),
+            "https://pacinspect.example/v1"
+        );
+        assert_eq!(
+            resolve_api_url(
+                Config::default().api_url,
+                false,
+                None,
+                Some("https://generic.example/v1".into())
+            ),
+            "https://generic.example/v1"
+        );
     }
 }

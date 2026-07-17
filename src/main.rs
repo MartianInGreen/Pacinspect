@@ -6,6 +6,7 @@ mod report;
 mod ui;
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -42,10 +43,10 @@ enum Command {
         command: ConfigCommand,
     },
 
-    /// Inspect a local directory containing a PKGBUILD
+    /// Inspect cached yay package directories, or one explicit PKGBUILD directory
     Scan {
-        #[arg(default_value = ".")]
-        path: PathBuf,
+        /// Package directory; omit to scan every PKGBUILD in yay's configured buildDir
+        path: Option<PathBuf>,
 
         /// Emit only the model report as JSON and never prompt
         #[arg(long)]
@@ -131,22 +132,93 @@ fn run_cli() -> Result<i32> {
             accept_risk,
         } => {
             let config = Config::load(&config_path)?;
-            let outcome = review_directory(
-                &path,
+            run_scan(
                 &config,
-                &ReviewOptions {
+                path,
+                ReviewOptions {
                     json,
                     non_interactive,
                     accept_risk,
+                    quiet: false,
                 },
-            )?;
-            Ok(if outcome.approved { 0 } else { 2 })
+            )
         }
         Command::Yay { args } => {
             let config = Config::load(&config_path)?;
             integration::run_yay(&config, &config_path, args)
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct BatchScanReport {
+    package_directory: PathBuf,
+    #[serde(flatten)]
+    report: report::AnalysisReport,
+}
+
+fn run_scan(config: &Config, path: Option<PathBuf>, mut options: ReviewOptions) -> Result<i32> {
+    let batch = path.is_none();
+    let directories = match path {
+        Some(path) => vec![path],
+        None => {
+            let build_dir = integration::yay_build_dir(&config.yay_binary).with_context(|| {
+                format!("failed to read configuration from {}", config.yay_binary)
+            })?;
+            cached_package_directories(&build_dir)?
+        }
+    };
+
+    if batch && !options.json {
+        eprintln!(
+            "Scanning {} cached package director{}",
+            directories.len(),
+            if directories.len() == 1 { "y" } else { "ies" }
+        );
+    }
+    options.quiet = batch && options.json;
+
+    let mut blocked = false;
+    let mut reports = Vec::with_capacity(if options.quiet { directories.len() } else { 0 });
+    for directory in directories {
+        let outcome = review_directory(&directory, config, &options)?;
+        blocked |= !outcome.approved;
+        if options.quiet {
+            reports.push(BatchScanReport {
+                package_directory: directory.canonicalize().unwrap_or(directory),
+                report: outcome.report,
+            });
+        }
+    }
+    if options.quiet {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    }
+    Ok(if blocked { 2 } else { 0 })
+}
+
+fn cached_package_directories(build_dir: &std::path::Path) -> Result<Vec<PathBuf>> {
+    if build_dir.join("PKGBUILD").is_file() {
+        return Ok(vec![build_dir.to_owned()]);
+    }
+    let entries = fs::read_dir(build_dir)
+        .with_context(|| format!("failed to read yay build directory {}", build_dir.display()))?;
+    let mut directories = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("failed to read an entry in {}", build_dir.display()))?
+            .path();
+        if path.join("PKGBUILD").is_file() {
+            directories.push(path);
+        }
+    }
+    directories.sort();
+    if directories.is_empty() {
+        bail!(
+            "no PKGBUILDs found in yay build directory {}",
+            build_dir.display()
+        );
+    }
+    Ok(directories)
 }
 
 fn run_shim() -> Result<i32> {
@@ -220,4 +292,33 @@ fn set_config_value(config: &mut Config, field: ConfigField, value: Option<Strin
         ConfigField::MakepkgBinary => config.makepkg_binary = value,
     }
     config.validate()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_path_is_optional() {
+        let cli = Cli::try_parse_from(["pacinspect", "scan"]).unwrap();
+        assert!(matches!(cli.command, Command::Scan { path: None, .. }));
+    }
+
+    #[test]
+    fn discovers_sorted_cached_package_directories() {
+        let build_dir = tempfile::tempdir().unwrap();
+        for name in ["z-package", "a-package"] {
+            let package_dir = build_dir.path().join(name);
+            fs::create_dir(&package_dir).unwrap();
+            fs::write(package_dir.join("PKGBUILD"), "pkgname=test\n").unwrap();
+        }
+        fs::create_dir(build_dir.path().join("not-a-package")).unwrap();
+
+        let directories = cached_package_directories(build_dir.path()).unwrap();
+        let names: Vec<_> = directories
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy())
+            .collect();
+        assert_eq!(names, ["a-package", "z-package"]);
+    }
 }

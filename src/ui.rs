@@ -16,11 +16,13 @@ pub struct ReviewOptions {
     pub json: bool,
     pub non_interactive: bool,
     pub accept_risk: bool,
+    pub quiet: bool,
 }
 
 pub struct ReviewOutcome {
     pub approved: bool,
     pub content_hash: String,
+    pub report: AnalysisReport,
 }
 
 pub fn review_directory(
@@ -30,7 +32,7 @@ pub fn review_directory(
 ) -> Result<ReviewOutcome> {
     loop {
         let bundle = inspect::collect(root, config.max_input_bytes)?;
-        if !options.json {
+        if !options.json && !options.quiet {
             eprintln!(
                 "{} {} with model {}",
                 Style::new().cyan().bold().apply_to("Inspecting"),
@@ -39,18 +41,22 @@ pub fn review_directory(
             );
         }
         let report = OpenAiClient::new(config)?.analyze(&bundle)?;
-        render_report(&report, options.json)?;
+        if !options.quiet {
+            render_report(&report, options.json)?;
+        }
         let blocked = report.should_block(config.block_threshold);
         if !blocked || options.accept_risk {
             return Ok(ReviewOutcome {
                 approved: true,
                 content_hash: bundle.content_hash,
+                report,
             });
         }
         if options.json || options.non_interactive || !io::stdin().is_terminal() {
             return Ok(ReviewOutcome {
                 approved: false,
                 content_hash: bundle.content_hash,
+                report,
             });
         }
 
@@ -59,6 +65,7 @@ pub fn review_directory(
                 return Ok(ReviewOutcome {
                     approved: false,
                     content_hash: bundle.content_hash,
+                    report,
                 });
             }
             ReviewAction::EditAndRescan => open_relevant_file(root, &report)?,
@@ -66,6 +73,7 @@ pub fn review_directory(
                 return Ok(ReviewOutcome {
                     approved: true,
                     content_hash: bundle.content_hash,
+                    report,
                 });
             }
         }

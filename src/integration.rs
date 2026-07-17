@@ -81,6 +81,7 @@ pub fn run_makepkg_shim(config: &Config, args: Vec<OsString>) -> Result<i32> {
             json: false,
             non_interactive: !std::io::stdin().is_terminal(),
             accept_risk: false,
+            quiet: false,
         };
         match review_directory(&root, config, &options) {
             Ok(outcome) if outcome.approved => {
@@ -154,18 +155,30 @@ fn sanitize_yay_args(args: Vec<OsString>) -> Result<(Vec<OsString>, Option<Strin
 
 #[derive(Deserialize)]
 struct YayConfig {
+    #[serde(default)]
     makepkgbin: String,
+    #[serde(rename = "buildDir", default)]
+    build_dir: Option<PathBuf>,
+}
+
+pub fn yay_build_dir(yay: &str) -> Result<PathBuf> {
+    query_yay_config(yay)
+        .and_then(|config| config.build_dir)
+        .context("yay did not return a buildDir in its current configuration")
 }
 
 fn query_yay_makepkg(yay: &str) -> Option<String> {
+    query_yay_config(yay)
+        .map(|config| config.makepkgbin)
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn query_yay_config(yay: &str) -> Option<YayConfig> {
     let output = Command::new(yay).args(["-P", "-g"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    serde_json::from_slice::<YayConfig>(&output.stdout)
-        .ok()
-        .map(|config| config.makepkgbin)
-        .filter(|command| !command.trim().is_empty())
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 fn approval_marker(run_dir: &Path, content_hash: &str) -> PathBuf {
