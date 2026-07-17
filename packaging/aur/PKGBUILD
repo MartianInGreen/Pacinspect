@@ -1,6 +1,6 @@
 # Maintainer: MartianInGreen <git@rennersh.de>
 pkgname=pacinspect
-pkgver=1.0.0
+pkgver=0.1.0
 pkgrel=1
 pkgdesc='AI-assisted security review gate for AUR PKGBUILDs'
 arch=('x86_64' 'aarch64')
@@ -10,7 +10,7 @@ depends=('git' 'glibc')
 makedepends=('cargo')
 optdepends=('yay: inspect complete AUR transactions before makepkg runs')
 options=('!lto' '!debug')
-_source_ref=v1.0.0
+_source_ref=v0.1.0
 source=("$pkgname-$pkgver.tar.gz::$url/archive/$_source_ref.tar.gz")
 sha256sums=('SKIP')
 
