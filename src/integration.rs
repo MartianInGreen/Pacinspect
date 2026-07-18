@@ -74,9 +74,20 @@ pub fn run_yay_preflight(config: &Config, file_args: Vec<OsString>) -> Result<i3
     let run_dir = inspection_run_directory()?;
     fs::create_dir_all(&run_dir)?;
     let directories = preflight_directories(file_args)?;
+    eprintln!(
+        "pacinspect: starting scan of {} package director{} with up to {} parallel request{}",
+        directories.len(),
+        if directories.len() == 1 { "y" } else { "ies" },
+        config.max_parallel_reviews.min(directories.len()),
+        if config.max_parallel_reviews.min(directories.len()) == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
     let completed = analyze_directories_parallel(&directories, config);
     let options = review_options();
-    let mut blocked = false;
+    let mut block_reasons = Vec::new();
 
     for (directory, completed) in directories.iter().zip(completed) {
         match completed {
@@ -90,7 +101,12 @@ pub fn run_yay_preflight(config: &Config, file_args: Vec<OsString>) -> Result<i3
                     Ok(outcome) if outcome.approved => {
                         write_approval(&run_dir, &outcome.content_hash, b"approved\n")?;
                     }
-                    Ok(_) => blocked = true,
+                    Ok(outcome) => block_reasons.push(format!(
+                        "review did not approve {} (verdict: {}, highest finding severity: {})",
+                        directory.display(),
+                        outcome.report.verdict,
+                        outcome.report.maximum_severity()
+                    )),
                     Err(error) if config.fail_open => {
                         print_serialized_warning(
                             &run_dir,
@@ -102,14 +118,10 @@ pub fn run_yay_preflight(config: &Config, file_args: Vec<OsString>) -> Result<i3
                         write_approval(&run_dir, &attempted_hash, b"fail-open\n")?;
                     }
                     Err(error) => {
-                        print_serialized_warning(
-                            &run_dir,
-                            format!(
-                                "blocked because inspection failed for {}: {error:#}",
-                                directory.display()
-                            ),
-                        )?;
-                        blocked = true;
+                        let reason =
+                            format!("inspection failed for {}: {error:#}", directory.display());
+                        print_serialized_warning(&run_dir, format!("blocked because {reason}"))?;
+                        block_reasons.push(reason);
                     }
                 }
             }
@@ -126,21 +138,27 @@ pub fn run_yay_preflight(config: &Config, file_args: Vec<OsString>) -> Result<i3
                 }
             }
             Err(error) => {
-                print_serialized_warning(
-                    &run_dir,
-                    format!(
-                        "blocked because inspection failed for {}: {error:#}",
-                        directory.display()
-                    ),
-                )?;
-                blocked = true;
+                let reason = format!("inspection failed for {}: {error:#}", directory.display());
+                print_serialized_warning(&run_dir, format!("blocked because {reason}"))?;
+                block_reasons.push(reason);
             }
         }
     }
 
-    if blocked {
+    if !block_reasons.is_empty() {
         with_review_lock(&run_dir, || {
-            eprintln!("pacinspect: transaction blocked before yay handed code to makepkg");
+            eprintln!("pacinspect: transaction blocked; no PKGBUILD code was handed to makepkg");
+            if block_reasons.len() == 1 {
+                eprintln!("pacinspect: reason: {}", block_reasons[0]);
+            } else {
+                eprintln!("pacinspect: reasons:");
+                for reason in &block_reasons {
+                    eprintln!("  - {reason}");
+                }
+            }
+            eprintln!(
+                "pacinspect: exiting with status 125 so yay aborts instead of continuing the transaction"
+            );
             Ok(())
         })?;
         return Ok(125);
@@ -162,8 +180,8 @@ pub fn run_makepkg_shim(config: &Config, args: Vec<OsString>) -> Result<i32> {
         .context("failed to suppress a duplicate package review")?;
 
     let marker = approval_marker(&run_dir, &content_hash);
-    let approved = if marker.is_file() {
-        true
+    let (approved, block_reason) = if marker.is_file() {
+        (true, None)
     } else {
         let review = analyze_bundle(root.clone(), bundle, config).and_then(|completed| {
             with_review_lock(&run_dir, || {
@@ -173,23 +191,29 @@ pub fn run_makepkg_shim(config: &Config, args: Vec<OsString>) -> Result<i32> {
         match review {
             Ok(outcome) if outcome.approved => {
                 write_approval(&run_dir, &outcome.content_hash, b"approved\n")?;
-                true
+                (true, None)
             }
-            Ok(_) => false,
+            Ok(outcome) => (
+                false,
+                Some(format!(
+                    "review did not approve {} (verdict: {}, highest finding severity: {})",
+                    root.display(),
+                    outcome.report.verdict,
+                    outcome.report.maximum_severity()
+                )),
+            ),
             Err(error) if config.fail_open => {
                 print_serialized_warning(
                     &run_dir,
                     format!("inspection failed but fail_open is enabled: {error:#}"),
                 )?;
                 write_approval(&run_dir, &content_hash, b"fail-open\n")?;
-                true
+                (true, None)
             }
             Err(error) => {
-                print_serialized_warning(
-                    &run_dir,
-                    format!("blocked because inspection failed: {error:#}"),
-                )?;
-                false
+                let reason = format!("inspection failed for {}: {error:#}", root.display());
+                print_serialized_warning(&run_dir, format!("blocked because {reason}"))?;
+                (false, Some(reason))
             }
         }
     };
@@ -197,7 +221,16 @@ pub fn run_makepkg_shim(config: &Config, args: Vec<OsString>) -> Result<i32> {
 
     if !approved {
         with_review_lock(&run_dir, || {
-            eprintln!("pacinspect: build blocked; no PKGBUILD code was handed to makepkg");
+            eprintln!(
+                "pacinspect: build blocked: {}",
+                block_reason
+                    .as_deref()
+                    .unwrap_or("inspection did not produce an approval")
+            );
+            eprintln!("pacinspect: no PKGBUILD code was handed to makepkg");
+            eprintln!(
+                "pacinspect: exiting with status 125 so yay aborts instead of continuing the transaction"
+            );
             Ok(())
         })?;
         return Ok(125);
